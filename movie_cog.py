@@ -32,13 +32,14 @@ import aiohttp
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 TMDB_BASE = "https://api.themoviedb.org/3"
 IMG_BASE = "https://image.tmdb.org/t/p/w500"
+DEFAULT_REGION = os.getenv("TMDB_REGION", "US")
 
 GREETING_FILE = "moviephone_greeting.mp3"
 
 # Normally "ffmpeg" alone works if it's on your system PATH (this is always
-# true on Railway once nixpacks.toml installs it). If you're testing locally
-# on Windows and ffmpeg still isn't found, set FFMPEG_PATH in your .env to
-# the full path of ffmpeg.exe as a workaround, e.g.:
+# true on Railway once the RAILPACK_DEPLOY_APT_PACKAGES env var installs it).
+# If you're testing locally on Windows and ffmpeg still isn't found, set
+# FFMPEG_PATH in your .env to the full path of ffmpeg.exe as a workaround, e.g.:
 #   FFMPEG_PATH=C:\Users\Dan\Downloads\ffmpeg-2026-08-09-git-6bbc22dc09-essentials_build\bin\ffmpeg.exe
 FFMPEG_EXECUTABLE = os.getenv("FFMPEG_PATH", "ffmpeg")
 
@@ -50,12 +51,14 @@ GENRES = {
     "Thriller": 53, "War": 10752, "Western": 37,
 }
 
+
 class TriviaButton(discord.ui.Button):
     def __init__(self, label: str):
         super().__init__(label=label[:80], style=discord.ButtonStyle.blurple)
 
     async def callback(self, interaction: discord.Interaction):
         await self.view.handle_answer(interaction, self)
+
 
 class TriviaView(discord.ui.View):
     def __init__(self, embed: discord.Embed, correct_title: str, options: list[str], timeout: float = 30):
@@ -101,6 +104,7 @@ class TriviaView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
+
 class MovieCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -127,7 +131,6 @@ class MovieCog(commands.Cog):
                 return await resp.json()
         except (aiohttp.ClientError, TimeoutError):
             return None
-            
 
     # ---------- /movie ----------
 
@@ -142,7 +145,7 @@ class MovieCog(commands.Cog):
             return
 
         movie_id = search["results"][0]["id"]
-        details = await self._get(f"/movie/{movie_id}", {"append_to_response": "credits"})
+        details = await self._get(f"/movie/{movie_id}", {"append_to_response": "credits,watch/providers"})
         if not details:
             await interaction.followup.send("Couldn't fetch details for that movie.")
             return
@@ -167,11 +170,27 @@ class MovieCog(commands.Cog):
             embed.add_field(name="Starring", value=cast, inline=False)
         if details.get("poster_path"):
             embed.set_image(url=f"{IMG_BASE}{details['poster_path']}")
-        embed.set_footer(text="Source: TMDb")
+
+        providers = details.get("watch/providers", {}).get("results", {}).get(DEFAULT_REGION, {})
+        if providers:
+            flatrate = providers.get("flatrate", [])
+            if flatrate:
+                names = ", ".join(p["provider_name"] for p in flatrate[:5])
+                embed.add_field(name=f"Streaming ({DEFAULT_REGION})", value=names, inline=False)
+            else:
+                rent_buy = providers.get("rent", []) or providers.get("buy", [])
+                if rent_buy:
+                    names = ", ".join(p["provider_name"] for p in rent_buy[:5])
+                    embed.add_field(name=f"Rent/Buy ({DEFAULT_REGION})", value=names, inline=False)
+            if providers.get("link"):
+                embed.add_field(name="More info", value=f"[View on JustWatch]({providers['link']})", inline=False)
+
+        embed.set_footer(text="Source: TMDb · Streaming data via JustWatch")
 
         await interaction.followup.send(embed=embed)
-    
+
     # ---------- /trivia ----------
+
     @app_commands.command(name="trivia", description="Guess the movie from its plot!")
     async def trivia(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -182,26 +201,26 @@ class MovieCog(commands.Cog):
             await interaction.followup.send("Couldn't load trivia right now, try again in a bit.")
             return
 
-    candidates = [m for m in data["results"] if m.get("overview") and len(m["overview"]) > 60]
-    if len(candidates) < 4:
-        await interaction.followup.send("Not enough movies to build a round, try again.")
-        return
+        candidates = [m for m in data["results"] if m.get("overview") and len(m["overview"]) > 60]
+        if len(candidates) < 4:
+            await interaction.followup.send("Not enough movies to build a round, try again.")
+            return
 
-    correct = random.choice(candidates)
-    decoys = random.sample([m for m in candidates if m["id"] != correct["id"]], 3)
-    options = [correct["title"]] + [m["title"] for m in decoys]
-    random.shuffle(options)
+        correct = random.choice(candidates)
+        decoys = random.sample([m for m in candidates if m["id"] != correct["id"]], 3)
+        options = [correct["title"]] + [m["title"] for m in decoys]
+        random.shuffle(options)
 
-    embed = discord.Embed(
-        title="🎬 Guess the Movie!",
-        description=correct["overview"],
-        color=discord.Color.orange(),
-    )
-    embed.set_footer(text="30 seconds — click the correct title below!")
+        embed = discord.Embed(
+            title="🎬 Guess the Movie!",
+            description=correct["overview"],
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="30 seconds — click the correct title below!")
 
-    view = TriviaView(embed=embed, correct_title=correct["title"], options=options, timeout=30)
-    msg = await interaction.followup.send(embed=embed, view=view)
-    view.message = msg
+        view = TriviaView(embed=embed, correct_title=correct["title"], options=options, timeout=30)
+        msg = await interaction.followup.send(embed=embed, view=view)
+        view.message = msg
 
     # ---------- /actor ----------
 
