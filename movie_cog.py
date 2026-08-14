@@ -50,6 +50,56 @@ GENRES = {
     "Thriller": 53, "War": 10752, "Western": 37,
 }
 
+class TriviaButton(discord.ui.Button):
+    def __init__(self, label: str):
+        super().__init__(label=label[:80], style=discord.ButtonStyle.blurple)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.handle_answer(interaction, self)
+
+class TriviaView(discord.ui.View):
+    def __init__(self, embed: discord.Embed, correct_title: str, options: list[str], timeout: float = 30):
+        super().__init__(timeout=timeout)
+        self.embed = embed
+        self.correct_title = correct_title
+        self.solved = False
+        self.message: discord.Message | None = None
+        for title in options:
+            self.add_item(TriviaButton(title))
+
+    def _reveal(self, winner: discord.Member | None):
+        self.embed.title = f"🎬 It was: {self.correct_title}!"
+        self.embed.color = discord.Color.green() if winner else discord.Color.red()
+        if winner:
+            self.embed.add_field(name="Winner", value=winner.mention, inline=False)
+        for child in self.children:
+            child.disabled = True
+            if isinstance(child, TriviaButton) and child.label == self.correct_title[:80]:
+                child.style = discord.ButtonStyle.green
+
+    async def handle_answer(self, interaction: discord.Interaction, button: "TriviaButton"):
+        if self.solved:
+            await interaction.response.send_message("This round is already over!", ephemeral=True)
+            return
+        if button.label == self.correct_title[:80]:
+            self.solved = True
+            self._reveal(winner=interaction.user)
+            await interaction.response.edit_message(embed=self.embed, view=self)
+            self.stop()
+        else:
+            button.style = discord.ButtonStyle.red
+            button.disabled = True
+            await interaction.response.edit_message(view=self)
+
+    async def on_timeout(self):
+        if self.solved:
+            return
+        self._reveal(winner=None)
+        if self.message:
+            try:
+                await self.message.edit(embed=self.embed, view=self)
+            except discord.HTTPException:
+                pass
 
 class MovieCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -77,6 +127,7 @@ class MovieCog(commands.Cog):
                 return await resp.json()
         except (aiohttp.ClientError, TimeoutError):
             return None
+            
 
     # ---------- /movie ----------
 
@@ -119,6 +170,38 @@ class MovieCog(commands.Cog):
         embed.set_footer(text="Source: TMDb")
 
         await interaction.followup.send(embed=embed)
+    
+    # ---------- /trivia ----------
+    @app_commands.command(name="trivia", description="Guess the movie from its plot!")
+    async def trivia(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        page = random.randint(1, 20)
+        data = await self._get("/movie/popular", {"page": page})
+        if not data or not data.get("results"):
+            await interaction.followup.send("Couldn't load trivia right now, try again in a bit.")
+            return
+
+    candidates = [m for m in data["results"] if m.get("overview") and len(m["overview"]) > 60]
+    if len(candidates) < 4:
+        await interaction.followup.send("Not enough movies to build a round, try again.")
+        return
+
+    correct = random.choice(candidates)
+    decoys = random.sample([m for m in candidates if m["id"] != correct["id"]], 3)
+    options = [correct["title"]] + [m["title"] for m in decoys]
+    random.shuffle(options)
+
+    embed = discord.Embed(
+        title="🎬 Guess the Movie!",
+        description=correct["overview"],
+        color=discord.Color.orange(),
+    )
+    embed.set_footer(text="30 seconds — click the correct title below!")
+
+    view = TriviaView(embed=embed, correct_title=correct["title"], options=options, timeout=30)
+    msg = await interaction.followup.send(embed=embed, view=view)
+    view.message = msg
 
     # ---------- /actor ----------
 
