@@ -52,7 +52,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from movie_cog import TMDB_API_KEY, TMDB_BASE, IMG_BASE  # reuse config
+from movie_cog import TMDB_API_KEY, TMDB_BASE  # reuse config
 
 # OMDb is only used for the optional "nominated for / won" award clue --
 # TMDb doesn't carry award data at all. Free key from
@@ -396,10 +396,9 @@ class TriviaCog(commands.Cog):
             description=question,
             color=discord.Color.gold(),
         )
-        # Hard mode hides the poster -- it's often a giveaway (franchise
-        # branding, recognizable art) that easy mode is fine giving away.
-        if poster_path and not hard:
-            embed.set_thumbnail(url=f"{IMG_BASE}{poster_path}")
+        # No poster for either difficulty -- on the easy plot-guess question
+        # in particular, the poster (title text, iconic art) is a dead
+        # giveaway and defeats the point of guessing from the plot.
         embed.set_footer(text="Source: TMDb")
 
         view = TriviaView(correct_label=answer, options=options)
