@@ -9,7 +9,7 @@ A Discord bot for looking up movies, actors, and getting genre-based recommendat
 - `/recommend <genre>` — get a random movie recommendation by genre
 - `/moviephone` — bot joins your voice channel and plays `moviephone_greeting.mp3`
 - `/trivia <difficulty>` — movie trivia, two very different modes:
-  - **Easy** — guess the movie from a trimmed plot summary with character names redacted, four multiple-choice title options, poster shown as a hint
+  - **Easy** — guess the movie from a trimmed plot summary with character names redacted, four multiple-choice title options
   - **Hard** — co-star, director, or genre/year questions pulled from deep TMDb catalog pages (not just the most popular titles), with tougher decoys and no visual hints
 - `/theaters [region]` — top 10 movies currently playing in theaters, ranked by popularity (defaults to `TMDB_REGION`, or `US`)
 - `/streaming [region]` — top 10 movies currently popular on subscription streaming, ranked by popularity (defaults to `TMDB_REGION`, or `US`)
@@ -84,7 +84,7 @@ Pulled from TMDb's `watch/providers` endpoint (data sourced from JustWatch), app
 ### Trivia (`/trivia`)
 Two modes with genuinely different formats, not just tuned-up difficulty:
 
-- **Easy** pulls a movie from TMDb's most popular pages, trims its plot overview to 2–3 sentences, and redacts any literal character-name matches using that movie's own cast credits (the `character` field) — an exact structured-data match rather than a guess at capitalized words. Presents 4 multiple-choice title options (decoys favor the same genre) and shows the poster as a hint.
+- **Easy** pulls a movie from TMDb's most popular pages, trims its plot overview to 2–3 sentences, and redacts any literal character-name matches using that movie's own cast credits (the `character` field) — an exact structured-data match rather than a guess at capitalized words. Presents 4 multiple-choice title options (decoys favor the same genre). No poster is shown — it would give the answer away instantly.
 - **Hard** builds one of three question types — who a given actor starred opposite, who directed a movie, or who directed/wrote a movie given its genre and year — pulled from much deeper (less-popular) TMDb pages, with 5-6 harder-to-eliminate decoy names, no poster, and (for the genre/year type) an occasional OMDb award-blurb bonus clue only in easy-adjacent contexts, never in hard mode.
 
 Answers are multiple-choice buttons rather than free text, so this doesn't require the `message_content` privileged intent.
