@@ -259,7 +259,7 @@ class TriviaCog(commands.Cog):
 
         return question, person["name"], options, details.get("poster_path")
 
-    @app_commands.command(name="trivia", description="Movie trivia -- pick a difficulty")
+    @app_commands.command(name="trivia", description="Harder movie trivia -- pick a difficulty")
     @app_commands.choices(difficulty=[
         app_commands.Choice(name="Easy", value="easy"),
         app_commands.Choice(name="Hard", value="hard"),
