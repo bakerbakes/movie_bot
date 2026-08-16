@@ -47,6 +47,7 @@ class MoviePhoneBot(commands.Bot):
         # to load extensions and sync the command tree.
         await self.load_extension("movie_cog")
         await self.load_extension("trivia_cog")
+        await self.load_extension("listings_cog")
         await self.tree.sync()
 
 
