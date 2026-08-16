@@ -5,28 +5,27 @@ Adds a /trivia command with real difficulty, built entirely from
 TMDb data you already have a key for -- no extra API needed for
 this part.
 
-Difficulty changes the actual construction of each question, not
-just which question type shows up more:
-  - Movie pool:    Easy pulls from TMDb's most popular movies (page
-                    1-3). Hard pulls from much deeper pages (15-60),
-                    so you're less likely to recognize the title on
-                    sight.
-  - Cast pool:     Easy co-star questions only use top-3-billed
-                    (obviously-a-lead) cast. Hard uses anyone in the
-                    top 10, including smaller parts.
-  - Decoys:        Easy decoys are mega-famous names (page 1 of
-                    TMDb's popular-people list) -- easy to rule out
-                    at a glance. Hard decoys come from deeper,
-                    similarly-obscure-tier pages, so they're genuinely
-                    plausible. Hard also shows 5 options instead of 4.
-  - Hints:         Easy shows the poster and, when available, an OMDb
-                    award clue. Hard shows neither.
+Difficulty now uses genuinely different question formats, not just
+harder versions of the same one:
 
-Question types (equally likely within a difficulty):
-  - co_star:        "In <Movie> (<year>), <Actor A> starred opposite ___."
-  - director:       "Who directed <Movie> (<year>)?"
-  - creator_genre:  "<Movie> (<year>) is a <Genre> film. Who directed/
-                     wrote it?"
+  - EASY:  "Guess the movie from this plot" -- a trimmed TMDb overview
+           with character names redacted (pulled from the movie's own
+           cast credits, so it's an exact match, not a guess at what
+           looks like a name), plus 4 multiple-choice movie titles.
+           This is deliberately the gentlest format: no crew trivia,
+           no cast trivia, just "does this plot ring a bell." Poster
+           shown as an extra assist.
+
+  - HARD:  co-star / director / genre-and-year questions, pulled from
+           TMDb's deep catalog with tough decoys and no visual hints:
+             - co_star:        "In <Movie> (<year>), <Actor A> starred
+                                opposite ___."
+             - director:       "Who directed <Movie> (<year>)?"
+             - creator_genre:  "<Movie> (<year>) is a <Genre> film.
+                                Who directed/wrote it?"
+           Movie pool: deep pages (15-60), not the most popular titles.
+           Decoys: similarly-obscure-tier names, 5 options instead of 4.
+           No poster, no award clue.
 
 Answers are presented as buttons (multiple choice) rather than free
 text, so this works without the message_content intent -- your bot
@@ -48,6 +47,7 @@ Load into your bot's setup_hook alongside movie_cog:
 
 import os
 import random
+import re
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -184,6 +184,79 @@ class TriviaCog(commands.Cog):
         random.shuffle(pool)
         return pool[:count]
 
+    def _redact_character_names(self, text: str, character_names: list[str]) -> str:
+        """
+        Replace literal occurrences of character names (pulled straight
+        from TMDb credits) with a blank. Exact matches against structured
+        data, not a guess at what "looks like" a proper noun -- so it
+        won't mangle unrelated words in the plot text.
+        """
+        names = set()
+        for raw in character_names:
+            # credits sometimes list dual roles like "John Smith / Old John"
+            for part in re.split(r"\s*/\s*", raw):
+                part = part.strip()
+                if len(part) > 2:  # skip tiny fragments that'd over-match
+                    names.add(part)
+
+        # Longest names first so "John Smith" is masked whole before "John" is.
+        for name in sorted(names, key=len, reverse=True):
+            pattern = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+            text = pattern.sub("___", text)
+        return text
+
+    async def _build_guess_plot_question(self, hard: bool):
+        """
+        Easy-mode-only format: a trimmed, name-redacted plot summary with
+        4 multiple-choice movie titles. Always pulls from the most
+        popular movies regardless of the hard flag, since this format is
+        only ever used for easy difficulty.
+        """
+        page = random.randint(1, 3)
+        data = await self._get("/movie/popular", {"page": page})
+        if not data or not data.get("results"):
+            return None
+
+        candidates = [m for m in data["results"] if m.get("overview") and len(m["overview"]) > 60]
+        if len(candidates) < 4:
+            return None
+        correct = random.choice(candidates)
+
+        details = await self._get(f"/movie/{correct['id']}", {"append_to_response": "credits"})
+        character_names = []
+        if details:
+            cast = details.get("credits", {}).get("cast", [])[:8]
+            character_names = [c.get("character", "") for c in cast if c.get("character")]
+
+        # Same-genre decoys first (harder to eyeball-eliminate by vibe),
+        # falling back to whatever else is in the pool if not enough.
+        correct_genre_ids = set(correct.get("genre_ids", []))
+        same_genre_pool = [
+            m for m in candidates
+            if m["id"] != correct["id"] and set(m.get("genre_ids", [])) & correct_genre_ids
+        ]
+        other_pool = [m for m in candidates if m["id"] != correct["id"] and m not in same_genre_pool]
+        decoy_pool = same_genre_pool if len(same_genre_pool) >= 3 else same_genre_pool + other_pool
+        if len(decoy_pool) < 3:
+            return None
+        decoys = random.sample(decoy_pool, 3)
+        options = [correct["title"]] + [m["title"] for m in decoys]
+
+        overview = correct["overview"]
+        sentences = overview.split(". ")
+        trimmed = ". ".join(sentences[:2])
+        if not trimmed.endswith("."):
+            trimmed += "."
+        if len(trimmed) < 40 and len(sentences) > 2:
+            trimmed = ". ".join(sentences[:3])
+            if not trimmed.endswith("."):
+                trimmed += "."
+
+        redacted = self._redact_character_names(trimmed, character_names)
+        question = f"Guess the movie from this plot:\n\n*{redacted}*"
+
+        return question, correct["title"], options, correct.get("poster_path")
+
     async def _build_co_star_question(self, hard: bool):
         movie = await self._random_movie(hard)
         if not movie:
@@ -298,11 +371,14 @@ class TriviaCog(commands.Cog):
         await interaction.response.defer()
 
         hard = difficulty is not None and difficulty.value == "hard"
-        builders = [
-            self._build_co_star_question,
-            self._build_director_question,
-            self._build_creator_genre_year_question,
-        ]
+        if hard:
+            builders = [
+                self._build_co_star_question,
+                self._build_director_question,
+                self._build_creator_genre_year_question,
+            ]
+        else:
+            builders = [self._build_guess_plot_question]
 
         result = None
         for _ in range(5):  # retry a few times in case a pick lacks enough data
