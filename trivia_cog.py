@@ -5,15 +5,28 @@ Adds a /trivia command with real difficulty, built entirely from
 TMDb data you already have a key for -- no extra API needed for
 this part.
 
-Question types (chosen randomly, weighted harder in "hard" mode):
+Difficulty changes the actual construction of each question, not
+just which question type shows up more:
+  - Movie pool:    Easy pulls from TMDb's most popular movies (page
+                    1-3). Hard pulls from much deeper pages (15-60),
+                    so you're less likely to recognize the title on
+                    sight.
+  - Cast pool:     Easy co-star questions only use top-3-billed
+                    (obviously-a-lead) cast. Hard uses anyone in the
+                    top 10, including smaller parts.
+  - Decoys:        Easy decoys are mega-famous names (page 1 of
+                    TMDb's popular-people list) -- easy to rule out
+                    at a glance. Hard decoys come from deeper,
+                    similarly-obscure-tier pages, so they're genuinely
+                    plausible. Hard also shows 5 options instead of 4.
+  - Hints:         Easy shows the poster and, when available, an OMDb
+                    award clue. Hard shows neither.
+
+Question types (equally likely within a difficulty):
   - co_star:        "In <Movie> (<year>), <Actor A> starred opposite ___."
   - director:       "Who directed <Movie> (<year>)?"
   - creator_genre:  "<Movie> (<year>) is a <Genre> film. Who directed/
-                     wrote it?" -- optionally followed by an OMDb award
-                     blurb ("Won 2 Oscars...") as a bonus clue. Requires
-                     OMDB_API_KEY (see below) for the award clue; the
-                     question still works fine without it, just without
-                     that extra hint.
+                     wrote it?"
 
 Answers are presented as buttons (multiple choice) rather than free
 text, so this works without the message_content intent -- your bot
@@ -143,16 +156,27 @@ class TriviaCog(commands.Cog):
             return None
         return awards
 
-    async def _random_popular_movie(self, pages_pool=20):
-        page = random.randint(1, pages_pool)
+    async def _random_movie(self, hard: bool):
+        # Easy: TMDb's most popular movies (page 1-3) -- stuff most
+        # people would recognize on sight.
+        # Hard: much deeper pages -- still real, TMDb-ranked movies,
+        # just far less likely to be instantly recognizable.
+        page = random.randint(15, 60) if hard else random.randint(1, 3)
         data = await self._get("/movie/popular", {"page": page})
         if not data or not data.get("results"):
             return None
         return random.choice(data["results"])
 
-    async def _decoy_names(self, exclude_ids, count=3):
-        """Pull plausible-but-wrong actor names from the popular people list."""
-        page = random.randint(1, 10)
+    async def _decoy_names(self, exclude_ids, hard: bool):
+        """
+        Pull plausible-but-wrong names.
+        Easy: page 1 of TMDb's popular-people list -- mega-famous names
+        that are easy to rule out on sight, and only 3 of them.
+        Hard: a deeper, similarly-obscure-tier page -- genuinely
+        plausible decoys, and 5 of them (more ways to be wrong).
+        """
+        count = 5 if hard else 3
+        page = random.randint(15, 40) if hard else 1
         data = await self._get("/person/popular", {"page": page})
         if not data or not data.get("results"):
             return []
@@ -160,21 +184,25 @@ class TriviaCog(commands.Cog):
         random.shuffle(pool)
         return pool[:count]
 
-    async def _build_co_star_question(self):
-        movie = await self._random_popular_movie()
+    async def _build_co_star_question(self, hard: bool):
+        movie = await self._random_movie(hard)
         if not movie:
             return None
         details = await self._get(f"/movie/{movie['id']}", {"append_to_response": "credits"})
         if not details:
             return None
         cast = details.get("credits", {}).get("cast", [])
-        cast = [c for c in cast if c.get("order", 99) < 8]
+        # Easy: only clearly-top-billed leads. Hard: any of the top 10,
+        # including smaller/supporting parts that are harder to place.
+        max_order = 10 if hard else 3
+        cast = [c for c in cast if c.get("order", 99) < max_order]
         if len(cast) < 2:
             return None
         known, blanked = random.sample(cast, 2)
         year = (details.get("release_date") or "????")[:4]
-        decoys = await self._decoy_names({known["id"], blanked["id"]}, count=3)
-        if len(decoys) < 3:
+        decoys = await self._decoy_names({known["id"], blanked["id"]}, hard)
+        min_decoys = 5 if hard else 3
+        if len(decoys) < min_decoys:
             return None
         options = decoys + [blanked["name"]]
         question = (
@@ -183,8 +211,8 @@ class TriviaCog(commands.Cog):
         )
         return question, blanked["name"], options, details.get("poster_path")
 
-    async def _build_director_question(self):
-        movie = await self._random_popular_movie()
+    async def _build_director_question(self, hard: bool):
+        movie = await self._random_movie(hard)
         if not movie:
             return None
         details = await self._get(f"/movie/{movie['id']}", {"append_to_response": "credits"})
@@ -195,19 +223,21 @@ class TriviaCog(commands.Cog):
         if not director:
             return None
         year = (details.get("release_date") or "????")[:4]
-        decoys = await self._decoy_names({director["id"]}, count=3)
-        if len(decoys) < 3:
+        decoys = await self._decoy_names({director["id"]}, hard)
+        min_decoys = 5 if hard else 3
+        if len(decoys) < min_decoys:
             return None
         options = decoys + [director["name"]]
         question = f"Who directed **{details.get('title')}** ({year})?"
         return question, director["name"], options, details.get("poster_path")
 
-    async def _build_creator_genre_year_question(self):
+    async def _build_creator_genre_year_question(self, hard: bool):
         """
-        '<Director/Writer> made this <Genre> movie in <Year>' style question,
-        with an optional OMDb award blurb tacked on as a bonus clue.
+        '<Director/Writer> made this <Genre> movie in <Year>' style question.
+        Easy also shows an OMDb award blurb as a bonus clue when available;
+        hard never does.
         """
-        movie = await self._random_popular_movie()
+        movie = await self._random_movie(hard)
         if not movie:
             return None
         details = await self._get(
@@ -239,8 +269,9 @@ class TriviaCog(commands.Cog):
         genre = random.choice(genres)["name"]
         year = (details.get("release_date") or "????")[:4]
 
-        decoys = await self._decoy_names({person["id"]}, count=3)
-        if len(decoys) < 3:
+        decoys = await self._decoy_names({person["id"]}, hard)
+        min_decoys = 5 if hard else 3
+        if len(decoys) < min_decoys:
             return None
         options = decoys + [person["name"]]
 
@@ -249,9 +280,8 @@ class TriviaCog(commands.Cog):
             f"Who {verb} it?"
         )
 
-        # ~50% of the time, if OMDb has award data, tack it on as a clue --
-        # keeps some questions harder (no clue) and some easier (with clue).
-        if random.random() < 0.5:
+        # Award clue is an easy-mode-only hint now -- hard never gets it.
+        if not hard:
             imdb_id = details.get("external_ids", {}).get("imdb_id")
             awards = await self._get_omdb_awards(imdb_id)
             if awards:
@@ -259,7 +289,7 @@ class TriviaCog(commands.Cog):
 
         return question, person["name"], options, details.get("poster_path")
 
-    @app_commands.command(name="trivia", description="Harder movie trivia -- pick a difficulty")
+    @app_commands.command(name="trivia", description="Movie trivia -- pick a difficulty")
     @app_commands.choices(difficulty=[
         app_commands.Choice(name="Easy", value="easy"),
         app_commands.Choice(name="Hard", value="hard"),
@@ -267,17 +297,16 @@ class TriviaCog(commands.Cog):
     async def trivia(self, interaction: discord.Interaction, difficulty: app_commands.Choice[str] = None):
         await interaction.response.defer()
 
-        hard = difficulty is None or difficulty.value == "hard"
-        # Hard mode leans on co-star and director-or-writer questions
-        # (requires knowing crew, not just the title); easy mode leans on
-        # plain "who directed" which is usually a more famous, single name.
-        builders = [self._build_co_star_question] * (3 if hard else 1)
-        builders += [self._build_director_question] * (1 if hard else 3)
-        builders += [self._build_creator_genre_year_question] * (3 if hard else 1)
+        hard = difficulty is not None and difficulty.value == "hard"
+        builders = [
+            self._build_co_star_question,
+            self._build_director_question,
+            self._build_creator_genre_year_question,
+        ]
 
         result = None
         for _ in range(5):  # retry a few times in case a pick lacks enough data
-            result = await random.choice(builders)()
+            result = await random.choice(builders)(hard)
             if result:
                 break
 
@@ -287,11 +316,13 @@ class TriviaCog(commands.Cog):
 
         question, answer, options, poster_path = result
         embed = discord.Embed(
-            title="🎬 Movie Trivia" + (" (Hard)" if hard else ""),
+            title=f"🎬 Movie Trivia ({'Hard' if hard else 'Easy'})",
             description=question,
             color=discord.Color.gold(),
         )
-        if poster_path:
+        # Hard mode hides the poster -- it's often a giveaway (franchise
+        # branding, recognizable art) that easy mode is fine giving away.
+        if poster_path and not hard:
             embed.set_thumbnail(url=f"{IMG_BASE}{poster_path}")
         embed.set_footer(text="Source: TMDb")
 
